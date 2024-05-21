@@ -130,7 +130,8 @@ fn feature_enabled(feature: &str) -> bool {
 fn main() {
     let do_utf8 = feature_enabled("UTF8");
     let do_utf32 = feature_enabled("UTF32");
-    let wants_static = feature_enabled("STATIC_PCRE2");
+    let wants_static =
+        feature_enabled("STATIC_PCRE2") || env::var_os("PCRE2_SYS_STATIC") == Some("1".into());
 
     if !do_utf8 && !do_utf32 {
         panic!("Must enable at least one of the UTF8 or UTF32 features");
@@ -140,10 +141,11 @@ fn main() {
     let target = env::var("TARGET").unwrap();
 
     // Don't link to a system library if we want a static build.
-    let do_static = wants_static
+    let do_static = (wants_static
         || target.contains("musl")
         || (do_utf8 && pkg_config::probe_library("libpcre2-8").is_err())
-        || (do_utf32 && pkg_config::probe_library("libpcre2-32").is_err());
+        || (do_utf32 && pkg_config::probe_library("libpcre2-32").is_err()))
+        && env::var_os("PCRE2_SYS_STATIC") != Some("0".into());
     if !do_static {
         return;
     }
