@@ -1,6 +1,6 @@
 [package]
 name = "pcre2"
-version = "0.2.6"  #:version
+version = "0.2.9"                                       #:version
 authors = ["Andrew Gallant <jamslam@gmail.com>"]
 description = "High level wrapper library for PCRE2."
 documentation = "https://docs.rs/pcre2"
@@ -18,7 +18,7 @@ members = ["pcre2-sys"]
 [dependencies]
 libc = "0.2.146"
 log = "0.4.19"
-pcre2-sys = { version = "0.2.7", path = "pcre2-sys" }
+pcre2-sys = { version = "0.2.9", path = "pcre2-sys" }
 
 [features]
 default = ["jit"]
