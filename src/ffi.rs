@@ -91,7 +91,7 @@ pub trait CodeUnitWidth: std::fmt::Debug + 'static {
     type PCRE2_CHAR: Default + Copy + TryInto<Self::SubjectChar>;
     type PCRE2_SPTR;
     type name_table_entry: NameTableEntry;
-    type SubjectChar: Copy;
+    type SubjectChar: Copy + Default;
     type Pattern: Clone + std::fmt::Debug;
 
     fn escape_subject(subject: &[Self::SubjectChar]) -> String;
@@ -973,7 +973,7 @@ impl<W: CodeUnitWidth> MatchData<W> {
     pub(crate) unsafe fn find(
         &mut self,
         code: &Code<W>,
-        mut subject: &[W::SubjectChar],
+        subject: &[W::SubjectChar],
         start: usize,
         options: u32,
     ) -> Result<bool, Error> {
@@ -996,17 +996,18 @@ impl<W: CodeUnitWidth> MatchData<W> {
         // explode if you try to dereference it.
         //
         // [1]: https://github.com/BurntSushi/rust-pcre2/issues/42
-        static SINGLETON: &[u8] = &[0];
-        let len = subject.len();
-        if subject.is_empty() {
-            subject = SINGLETON;
-        }
-        let (subj_ptr, subj_len) = W::subject_to_sptr_len(subject);
+        let singleton: W::SubjectChar = Default::default();
+        let (subj_ptr, subj_len) = if subject.is_empty() {
+            let ptr = W::subject_to_sptr_len(slice::from_ref(&singleton)).0;
+            (ptr, 0)
+        } else {
+            W::subject_to_sptr_len(subject)
+        };
 
         let rc = W::pcre2_match(
             code.as_ptr(),
-            subject.as_ptr(),
-            len,
+            subj_ptr,
+            subj_len,
             start,
             options,
             self.match_data,
