@@ -1,11 +1,11 @@
 [package]
 name = "pcre2-sys"
 version = "0.2.9"  #:version
-authors = ["Andrew Gallant <jamslam@gmail.com>"]
+authors = ["Andrew Gallant <jamslam@gmail.com>", "fish-shell contributors"]
 description = "Low level bindings to PCRE2."
 documentation = "https://docs.rs/pcre2-sys"
-homepage = "https://github.com/BurntSushi/rust-pcre2"
-repository = "https://github.com/BurntSushi/rust-pcre2"
+homepage = "https://github.com/fish-shell/rust-pcre2"
+repository = "https://github.com/fish-shell/rust-pcre2"
 readme = "README.md"
 keywords = ["pcre", "pcre2", "regex", "jit"]
 license = "Unlicense OR MIT"
