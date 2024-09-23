@@ -1,21 +1,26 @@
-use std::borrow::Cow;
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fmt;
-use std::ops::Index;
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt,
+    ops::Index,
+    panic::{RefUnwindSafe, UnwindSafe},
+    sync::Arc,
+};
 
 use log::debug;
 use pcre2_sys::{
-    PCRE2_CASELESS, PCRE2_DOTALL, PCRE2_ERROR_NOMEMORY, PCRE2_EXTENDED, PCRE2_MULTILINE,
-    PCRE2_NEVER_UTF, PCRE2_NEWLINE_ANYCRLF, PCRE2_NO_UTF_CHECK, PCRE2_SUBSTITUTE_EXTENDED,
-    PCRE2_SUBSTITUTE_GLOBAL, PCRE2_SUBSTITUTE_OVERFLOW_LENGTH, PCRE2_SUBSTITUTE_UNSET_EMPTY,
-    PCRE2_UCP, PCRE2_UNSET, PCRE2_UTF,
+    PCRE2_CASELESS, PCRE2_DOTALL, PCRE2_ERROR_NOMEMORY, PCRE2_EXTENDED,
+    PCRE2_MATCH_INVALID_UTF, PCRE2_MULTILINE, PCRE2_NEVER_UTF,
+    PCRE2_NEWLINE_ANYCRLF, PCRE2_SUBSTITUTE_EXTENDED, PCRE2_SUBSTITUTE_GLOBAL,
+    PCRE2_SUBSTITUTE_OVERFLOW_LENGTH, PCRE2_SUBSTITUTE_UNSET_EMPTY, PCRE2_UCP,
+    PCRE2_UNSET, PCRE2_UTF,
 };
-use thread_local::ThreadLocal;
 
-use crate::error::Error;
-use crate::ffi::{Code, CodeUnitWidth, CompileContext, MatchConfig, MatchData};
+use crate::{
+    error::Error,
+    ffi::{Code, CodeUnitWidth, CompileContext, MatchConfig, MatchData},
+    pool::{Pool, PoolGuard},
+};
 
 /// Match represents a single match of a regex in a subject string.
 ///
@@ -49,11 +54,7 @@ impl<'s, W: CodeUnitWidth> Match<'s, W> {
 
     /// Creates a new match from the given subject string and byte offsets.
     fn new(subject: &'s [W::SubjectChar], start: usize, end: usize) -> Self {
-        Match {
-            subject,
-            start,
-            end,
-        }
+        Match { subject, start, end }
     }
 
     #[cfg(test)]
@@ -79,9 +80,7 @@ struct Config {
     /// PCRE2_UTF
     utf: bool,
     /// PCRE2_NEVER_UTF
-    never_utf: bool,
-    /// PCRE2_NO_UTF_CHECK
-    utf_check: bool,
+    block_utf_pattern_directive: bool,
     /// use pcre2_jit_compile
     jit: JITChoice,
     /// Match-time specific configuration knobs.
@@ -108,8 +107,7 @@ impl Default for Config {
             crlf: false,
             ucp: false,
             utf: false,
-            never_utf: false,
-            utf_check: true,
+            block_utf_pattern_directive: false,
             jit: JITChoice::Never,
             match_config: MatchConfig::default(),
         }
@@ -138,7 +136,10 @@ impl<W: CodeUnitWidth> RegexBuilder<W> {
     ///
     /// If there was a problem compiling the pattern, then an error is
     /// returned.
-    pub fn build<Pat: Into<W::Pattern>>(&self, pattern: Pat) -> Result<Regex<W>, Error> {
+    pub fn build<Pat: Into<W::Pattern>>(
+        &self,
+        pattern: Pat,
+    ) -> Result<Regex<W>, Error> {
         let mut options = 0;
         if self.config.caseless {
             options |= PCRE2_CASELESS;
@@ -155,11 +156,12 @@ impl<W: CodeUnitWidth> RegexBuilder<W> {
         if self.config.ucp {
             options |= PCRE2_UCP;
             options |= PCRE2_UTF;
+            options |= PCRE2_MATCH_INVALID_UTF;
         }
         if self.config.utf {
             options |= PCRE2_UTF;
         }
-        if self.config.never_utf {
+        if self.config.block_utf_pattern_directive {
             options |= PCRE2_NEVER_UTF;
         }
 
@@ -189,13 +191,21 @@ impl<W: CodeUnitWidth> RegexBuilder<W> {
                 idx.insert(name.to_string(), i);
             }
         }
+        let code = Arc::new(code);
+        let match_data = {
+            let config = self.config.match_config.clone();
+            let code = Arc::clone(&code);
+            let create: MatchDataPoolFn<W> =
+                Box::new(move || MatchData::new(config.clone(), &code));
+            Pool::new(create)
+        };
         Ok(Regex {
             config: Arc::new(self.config.clone()),
-            pattern: pattern,
-            code: Arc::new(code),
+            pattern,
+            code,
             capture_names: Arc::new(capture_names),
             capture_names_idx: Arc::new(idx),
-            match_data: ThreadLocal::new(),
+            match_data,
         })
     }
 
@@ -278,43 +288,38 @@ impl<W: CodeUnitWidth> RegexBuilder<W> {
     /// as when this is disabled, `.` will any single byte (except for `\n` in
     /// both cases, unless "dot all" mode is enabled).
     ///
-    /// Note that when UTF matching mode is enabled, every search performed
-    /// will do a UTF-8 validation check, which can impact performance. The
-    /// UTF-8 check can be disabled via the `disable_utf_check` option, but it
-    /// is undefined behavior to enable UTF matching mode and search invalid
-    /// UTF-8.
-    ///
     /// This is disabled by default.
     pub fn utf(&mut self, yes: bool) -> &mut Self {
         self.config.utf = yes;
         self
     }
 
-    /// Prevent patterns from opting in to UTF matching mode.
+    /// Prevent patterns from opting in to UTF matching mode in spite of any flags.
     ///
-    /// This disables the sequence `(*UTF)` from switching to UTF mode.
-    pub fn never_utf(&mut self, yes: bool) -> &mut Self {
-        self.config.never_utf = yes;
+    /// This causes the directive `(*UTF)` in the pattern to emit an error.
+    /// This does not affect any other flags controlling UTF matching mode;
+    /// it merely disables a particular syntax item in the pattern.
+    pub fn block_utf_pattern_directive(&mut self, yes: bool) -> &mut Self {
+        self.config.block_utf_pattern_directive = yes;
         self
     }
 
-    /// When UTF matching mode is enabled, this will disable the UTF checking
-    /// that PCRE2 will normally perform automatically. If UTF matching mode
-    /// is not enabled, then this has no effect.
+    /// This is now deprecated and is a no-op.
     ///
-    /// UTF checking is enabled by default when UTF matching mode is enabled.
-    /// If UTF matching mode is enabled and UTF checking is enabled, then PCRE2
-    /// will return an error if you attempt to search a subject string that is
-    /// not valid UTF-8.
+    /// Previously, this option permitted disabling PCRE2's UTF-8 validity
+    /// check, which could result in undefined behavior if the haystack was
+    /// not valid UTF-8. But PCRE2 introduced a new option, `PCRE2_MATCH_INVALID_UTF`,
+    /// in 10.34 which this crate always sets. When this option is enabled,
+    /// PCRE2 claims to not have undefined behavior when the haystack is
+    /// invalid UTF-8.
     ///
-    /// # Safety
-    ///
-    /// It is undefined behavior to disable the UTF check in UTF matching mode
-    /// and search a subject string that is not valid UTF-8. When the UTF check
-    /// is disabled, callers must guarantee that the subject string is valid
-    /// UTF-8.
-    pub unsafe fn disable_utf_check(&mut self) -> &mut Self {
-        self.config.utf_check = false;
+    /// Therefore, disabling the UTF-8 check is not something that is exposed
+    /// by this crate.
+    #[deprecated(
+        since = "0.2.4",
+        note = "now a no-op due to new PCRE2 features"
+    )]
+    pub fn disable_utf_check(&mut self) -> &mut Self {
         self
     }
 
@@ -389,24 +394,26 @@ pub struct Regex<W: CodeUnitWidth> {
     capture_names: Arc<Vec<Option<String>>>,
     /// A map from capture group name to capture group index.
     capture_names_idx: Arc<HashMap<String, usize>>,
-    /// Mutable scratch data used by PCRE2 during matching.
-    ///
-    /// We use the same strategy as Rust's regex crate here, such that each
-    /// thread gets its own match data to support using a Regex object from
-    /// multiple threads simultaneously. If some match data doesn't exist for
-    /// a thread, then a new one is created on demand.
-    match_data: ThreadLocal<RefCell<MatchData<W>>>,
+    /// A pool of mutable scratch data used by PCRE2 during matching.
+    match_data: MatchDataPool<W>,
 }
 
 impl<W: CodeUnitWidth> Clone for Regex<W> {
     fn clone(&self) -> Self {
+        let match_data = {
+            let config = self.config.match_config.clone();
+            let code = Arc::clone(&self.code);
+            let create: MatchDataPoolFn<W> =
+                Box::new(move || MatchData::new(config.clone(), &code));
+            Pool::new(create)
+        };
         Self {
             config: Arc::clone(&self.config),
             pattern: self.pattern.clone(),
             code: Arc::clone(&self.code),
             capture_names: Arc::clone(&self.capture_names),
             capture_names_idx: Arc::clone(&self.capture_names_idx),
-            match_data: ThreadLocal::new(),
+            match_data,
         }
     }
 }
@@ -432,24 +439,76 @@ impl<W: CodeUnitWidth> Regex<W> {
     }
 
     /// Returns true if and only if the regex matches the subject string given.
+    ///
+    /// # Example
+    ///
+    /// Test if some text contains at least one word with exactly 13 ASCII word
+    /// bytes:
+    ///
+    /// ```rust
+    /// # fn example() -> Result<(), ::pcre2::Error> {
+    /// use pcre2::bytes::Regex;
+    ///
+    /// let text = b"I categorically deny having triskaidekaphobia.";
+    /// assert!(Regex::new(r"\b\w{13}\b")?.is_match(text)?);
+    /// # Ok(()) }; example().unwrap()
+    /// ```
     pub fn is_match(&self, subject: &[W::SubjectChar]) -> Result<bool, Error> {
         self.is_match_at(subject, 0)
     }
 
     /// Returns the start and end byte range of the leftmost-first match in
     /// `subject`. If no match exists, then `None` is returned.
-    pub fn find<'s>(&self, subject: &'s [W::SubjectChar]) -> Result<Option<Match<'s, W>>, Error> {
+    ///
+    /// # Example
+    ///
+    /// Find the start and end location of the first word with exactly 13
+    /// ASCII word bytes:
+    ///
+    /// ```rust
+    /// # fn example() -> Result<(), ::pcre2::Error> {
+    /// use pcre2::bytes::Regex;
+    ///
+    /// let text = b"I categorically deny having triskaidekaphobia.";
+    /// let mat = Regex::new(r"\b\w{13}\b")?.find(text)?.unwrap();
+    /// assert_eq!((mat.start(), mat.end()), (2, 15));
+    /// # Ok(()) }; example().unwrap()
+    /// ```
+    pub fn find<'s>(
+        &self,
+        subject: &'s [W::SubjectChar],
+    ) -> Result<Option<Match<'s, W>>, Error> {
         self.find_at(subject, 0)
     }
 
     /// Returns an iterator for each successive non-overlapping match in
     /// `subject`, returning the start and end byte indices with respect to
     /// `subject`.
-    pub fn find_iter<'r, 's>(&'r self, subject: &'s [W::SubjectChar]) -> Matches<'r, 's, W> {
+    ///
+    /// # Example
+    ///
+    /// Find the start and end location of every word with exactly 13 ASCII
+    /// word bytes:
+    ///
+    /// ```rust
+    /// # fn example() -> Result<(), ::pcre2::Error> {
+    /// use pcre2::bytes::Regex;
+    ///
+    /// let text = b"Retroactively relinquishing remunerations is reprehensible.";
+    /// for result in Regex::new(r"\b\w{13}\b")?.find_iter(text) {
+    ///     let mat = result?;
+    ///     println!("{:?}", mat);
+    /// }
+    /// # Ok(()) }; example().unwrap()
+    /// ```
+    pub fn find_iter<'r, 's>(
+        &'r self,
+        subject: &'s [W::SubjectChar],
+    ) -> Matches<'r, 's, W> {
         Matches {
             re: self,
             match_data: self.match_data(),
-            subject: subject,
+            subject,
             last_end: 0,
             last_match: None,
         }
@@ -459,6 +518,59 @@ impl<W: CodeUnitWidth> Regex<W> {
     /// match in `subject`. Capture group `0` always corresponds to the entire
     /// match. If no match is found, then `None` is returned.
     ///
+    /// # Examples
+    ///
+    /// Say you have some text with movie names and their release years,
+    /// like "'Citizen Kane' (1941)". It'd be nice if we could search for text
+    /// looking like that, while also extracting the movie name and its release
+    /// year separately.
+    ///
+    /// ```rust
+    /// # fn example() -> Result<(), ::pcre2::Error> {
+    /// use pcre2::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"'([^']+)'\s+\((\d{4})\)")?;
+    /// let text = b"Not my favorite movie: 'Citizen Kane' (1941).";
+    /// let caps = re.captures(text)?.unwrap();
+    /// assert_eq!(&caps[1], &b"Citizen Kane"[..]);
+    /// assert_eq!(&caps[2], &b"1941"[..]);
+    /// assert_eq!(&caps[0], &b"'Citizen Kane' (1941)"[..]);
+    /// // You can also access the groups by index using the Index notation.
+    /// // Note that this will panic on an invalid index.
+    /// assert_eq!(&caps[1], b"Citizen Kane");
+    /// assert_eq!(&caps[2], b"1941");
+    /// assert_eq!(&caps[0], b"'Citizen Kane' (1941)");
+    /// # Ok(()) }; example().unwrap()
+    /// ```
+    ///
+    /// Note that the full match is at capture group `0`. Each subsequent
+    /// capture group is indexed by the order of its opening `(`.
+    ///
+    /// We can make this example a bit clearer by using *named* capture groups:
+    ///
+    /// ```rust
+    /// # fn example() -> Result<(), ::pcre2::Error> {
+    /// use pcre2::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"'(?P<title>[^']+)'\s+\((?P<year>\d{4})\)")?;
+    /// let text = b"Not my favorite movie: 'Citizen Kane' (1941).";
+    /// let caps = re.captures(text)?.unwrap();
+    /// assert_eq!(&caps["title"], &b"Citizen Kane"[..]);
+    /// assert_eq!(&caps["year"], &b"1941"[..]);
+    /// assert_eq!(&caps[0], &b"'Citizen Kane' (1941)"[..]);
+    /// // You can also access the groups by name using the Index notation.
+    /// // Note that this will panic on an invalid group name.
+    /// assert_eq!(&caps["title"], b"Citizen Kane");
+    /// assert_eq!(&caps["year"], b"1941");
+    /// assert_eq!(&caps[0], b"'Citizen Kane' (1941)");
+    /// # Ok(()) }; example().unwrap()
+    /// ```
+    ///
+    /// Here we name the capture groups, which we can access with the `name`
+    /// method or the `Index` notation with a `&str`. Note that the named
+    /// capture groups are still accessible with `get` or the `Index` notation
+    /// with a `usize`.
+    ///
     /// The `0`th capture group is always unnamed, so it must always be
     /// accessed with `get(0)` or `[0]`.
     pub fn captures<'s>(
@@ -466,28 +578,47 @@ impl<W: CodeUnitWidth> Regex<W> {
         subject: &'s [W::SubjectChar],
     ) -> Result<Option<Captures<'s, W>>, Error> {
         let mut locs = self.capture_locations();
-        Ok(self
-            .captures_read(&mut locs, subject)?
-            .map(move |_| Captures {
-                subject,
-                locs: locs,
-                idx: Arc::clone(&self.capture_names_idx),
-            }))
+        Ok(self.captures_read(&mut locs, subject)?.map(move |_| Captures {
+            subject,
+            locs,
+            idx: Arc::clone(&self.capture_names_idx),
+        }))
     }
 
     /// Returns an iterator over all the non-overlapping capture groups matched
     /// in `subject`. This is operationally the same as `find_iter`, except it
     /// yields information about capturing group matches.
+    ///
+    /// # Example
+    ///
+    /// We can use this to find all movie titles and their release years in
+    /// some text, where the movie is formatted like "'Title' (xxxx)":
+    ///
+    /// ```rust
+    /// # fn example() -> Result<(), ::pcre2::Error> {
+    /// use std::str;
+    ///
+    /// use pcre2::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"'(?P<title>[^']+)'\s+\((?P<year>\d{4})\)")?;
+    /// let text = b"'Citizen Kane' (1941), 'The Wizard of Oz' (1939), 'M' (1931).";
+    /// for result in re.captures_iter(text) {
+    ///     let caps = result?;
+    ///     let title = str::from_utf8(&caps["title"]).unwrap();
+    ///     let year = str::from_utf8(&caps["year"]).unwrap();
+    ///     println!("Movie: {:?}, Released: {:?}", title, year);
+    /// }
+    /// // Output:
+    /// // Movie: Citizen Kane, Released: 1941
+    /// // Movie: The Wizard of Oz, Released: 1939
+    /// // Movie: M, Released: 1931
+    /// # Ok(()) }; example().unwrap()
+    /// ```
     pub fn captures_iter<'r, 's>(
         &'r self,
         subject: &'s [W::SubjectChar],
     ) -> CaptureMatches<'r, 's, W> {
-        CaptureMatches {
-            re: self,
-            subject: subject,
-            last_end: 0,
-            last_match: None,
-        }
+        CaptureMatches { re: self, subject, last_end: 0, last_match: None }
     }
 
     /// Test helper to access capture name indexes.
@@ -557,14 +688,21 @@ impl<W: CodeUnitWidth> Regex<W> {
         // Example: our initial capacity is 256. If the returned string needs to be of length 512,
         // then PCRE2 will report NOMEMORY and set capacity to 513. After reallocating we pass in
         // a capacity of 513; it succeeds and sets capacity to 512, which is the length of the result.
-        let mut stack_storage: [W::PCRE2_CHAR; 256] = [W::PCRE2_CHAR::default(); 256];
+        let mut stack_storage: [W::PCRE2_CHAR; 256] =
+            [W::PCRE2_CHAR::default(); 256];
         let mut heap_storage = Vec::new();
         let mut output = stack_storage.as_mut();
         let mut capacity = output.len();
 
         let mut rc = unsafe {
-            self.code
-                .substitute(subject, replacement, 0, options, output, &mut capacity)
+            self.code.substitute(
+                subject,
+                replacement,
+                0,
+                options,
+                output,
+                &mut capacity,
+            )
         };
 
         if let Err(e) = &rc {
@@ -576,8 +714,14 @@ impl<W: CodeUnitWidth> Regex<W> {
                 output = &mut heap_storage;
                 capacity = output.len();
                 rc = unsafe {
-                    self.code
-                        .substitute(subject, replacement, 0, options, output, &mut capacity)
+                    self.code.substitute(
+                        subject,
+                        replacement,
+                        0,
+                        options,
+                        output,
+                        &mut capacity,
+                    )
                 };
             }
         }
@@ -590,12 +734,14 @@ impl<W: CodeUnitWidth> Regex<W> {
 
                 // All inputs contained valid chars, so we expect all outputs to as well.
                 let to_char = |c: W::PCRE2_CHAR| -> W::SubjectChar {
-                    c.try_into()
-                        .unwrap_or_else(|_| panic!("all output expected to be valid chars"))
+                    c.try_into().unwrap_or_else(|_| {
+                        panic!("all output expected to be valid chars")
+                    })
                 };
 
                 // this is really just a type cast
-                let x: Vec<W::SubjectChar> = output.iter().copied().map(to_char).collect();
+                let x: Vec<W::SubjectChar> =
+                    output.iter().copied().map(to_char).collect();
                 Cow::Owned(x)
             }
         };
@@ -611,7 +757,11 @@ impl<W: CodeUnitWidth> Regex<W> {
     /// The significance of the starting point is that it takes the surrounding
     /// context into consideration. For example, the `\A` anchor can only
     /// match when `start == 0`.
-    pub fn is_match_at(&self, subject: &[W::SubjectChar], start: usize) -> Result<bool, Error> {
+    pub fn is_match_at(
+        &self,
+        subject: &[W::SubjectChar],
+        start: usize,
+    ) -> Result<bool, Error> {
         assert!(
             start <= subject.len(),
             "start ({}) must be <= subject.len() ({})",
@@ -619,18 +769,13 @@ impl<W: CodeUnitWidth> Regex<W> {
             subject.len()
         );
 
-        let mut options = 0;
-        if !self.config.utf_check {
-            options |= PCRE2_NO_UTF_CHECK;
-        }
-
-        let match_data = self.match_data();
-        let mut match_data = match_data.borrow_mut();
-        // SAFETY: The only unsafe PCRE2 option we potentially use here is
-        // PCRE2_NO_UTF_CHECK, and that only occurs if the caller executes the
-        // `disable_utf_check` method, which propagates the safety contract to
-        // the caller.
-        Ok(unsafe { match_data.find(&self.code, subject, start, options)? })
+        let options = 0;
+        let mut match_data = self.match_data();
+        // SAFETY: We don't use any dangerous PCRE2 options.
+        let res =
+            unsafe { match_data.find(&self.code, subject, start, options) };
+        PoolGuard::put(match_data);
+        res
     }
 
     /// Returns the same as find, but starts the search at the given
@@ -644,7 +789,11 @@ impl<W: CodeUnitWidth> Regex<W> {
         subject: &'s [W::SubjectChar],
         start: usize,
     ) -> Result<Option<Match<'s, W>>, Error> {
-        self.find_at_with_match_data(self.match_data(), subject, start)
+        let mut match_data = self.match_data();
+        let res =
+            self.find_at_with_match_data(&mut match_data, subject, start);
+        PoolGuard::put(match_data);
+        res
     }
 
     /// Like find_at, but accepts match data instead of acquiring one itself.
@@ -654,7 +803,7 @@ impl<W: CodeUnitWidth> Regex<W> {
     #[inline(always)]
     fn find_at_with_match_data<'s>(
         &self,
-        match_data: &RefCell<MatchData<W>>,
+        match_data: &mut MatchDataPoolGuard<'_, W>,
         subject: &'s [W::SubjectChar],
         start: usize,
     ) -> Result<Option<Match<'s, W>>, Error> {
@@ -665,22 +814,14 @@ impl<W: CodeUnitWidth> Regex<W> {
             subject.len()
         );
 
-        let mut options = 0;
-        if !self.config.utf_check {
-            options |= PCRE2_NO_UTF_CHECK;
-        }
-
-        let mut match_data = match_data.borrow_mut();
-        // SAFETY: The only unsafe PCRE2 option we potentially use here is
-        // PCRE2_NO_UTF_CHECK, and that only occurs if the caller executes the
-        // `disable_utf_check` method, which propagates the safety contract to
-        // the caller.
+        let options = 0;
+        // SAFETY: We don't use any dangerous PCRE2 options.
         if unsafe { !match_data.find(&self.code, subject, start, options)? } {
             return Ok(None);
         }
         let ovector = match_data.ovector();
         let (s, e) = (ovector[0], ovector[1]);
-        Ok(Some(Match::new(&subject[s..e], s, e)))
+        Ok(Some(Match::new(subject, s, e)))
     }
 
     /// This is like `captures`, but uses
@@ -720,20 +861,14 @@ impl<W: CodeUnitWidth> Regex<W> {
             subject.len()
         );
 
-        let mut options = 0;
-        if !self.config.utf_check {
-            options |= PCRE2_NO_UTF_CHECK;
-        }
-        // SAFETY: The only unsafe PCRE2 option we potentially use here is
-        // PCRE2_NO_UTF_CHECK, and that only occurs if the caller executes the
-        // `disable_utf_check` method, which propagates the safety contract to
-        // the caller.
+        let options = 0;
+        // SAFETY: We don't use any dangerous PCRE2 options.
         if unsafe { !locs.data.find(&self.code, subject, start, options)? } {
             return Ok(None);
         }
         let ovector = locs.data.ovector();
         let (s, e) = (ovector[0], ovector[1]);
-        Ok(Some(Match::new(&subject[s..e], s, e)))
+        Ok(Some(Match::new(subject, s, e)))
     }
 }
 
@@ -764,9 +899,7 @@ impl<W: CodeUnitWidth> Regex<W> {
     /// This is always 1 more than the number of syntactic groups in the
     /// pattern, since the first group always corresponds to the entire match.
     pub fn captures_len(&self) -> usize {
-        self.code
-            .capture_count()
-            .expect("a valid capture count from PCRE2")
+        self.code.capture_count().expect("a valid capture count from PCRE2")
     }
 
     /// Returns an empty set of capture locations that can be reused in
@@ -778,9 +911,8 @@ impl<W: CodeUnitWidth> Regex<W> {
         }
     }
 
-    fn match_data(&self) -> &RefCell<MatchData<W>> {
-        let create = || RefCell::new(self.new_match_data());
-        self.match_data.get_or(create)
+    fn match_data(&self) -> MatchDataPoolGuard<'_, W> {
+        self.match_data.get()
     }
 
     fn new_match_data(&self) -> MatchData<W> {
@@ -862,7 +994,7 @@ impl<W: CodeUnitWidth> CaptureLocations<W> {
     }
 }
 
-/// Captures represents a group of captured byte strings for a single match.
+/// `Captures` represents a group of captured strings for a single match.
 ///
 /// The 0th capture always corresponds to the entire match. Each subsequent
 /// index corresponds to the next capture group in the regex. If a capture
@@ -883,10 +1015,27 @@ impl<'s, W: CodeUnitWidth> Captures<'s, W> {
     /// Returns the match associated with the capture group at index `i`. If
     /// `i` does not correspond to a capture group, or if the capture group
     /// did not participate in the match, then `None` is returned.
+    ///
+    /// # Examples
+    ///
+    /// Get the text of the match with a default of an empty string if this
+    /// group didn't participate in the match:
+    ///
+    /// ```rust
+    /// # fn example() -> Result<(), ::pcre2::Error> {
+    /// use pcre2::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"[a-z]+(?:([0-9]+)|([A-Z]+))")?;
+    /// let caps = re.captures(b"abc123")?.unwrap();
+    ///
+    /// let text1 = caps.get(1).map_or(&b""[..], |m| m.as_bytes());
+    /// let text2 = caps.get(2).map_or(&b""[..], |m| m.as_bytes());
+    /// assert_eq!(text1, &b"123"[..]);
+    /// assert_eq!(text2, &b""[..]);
+    /// # Ok(()) }; example().unwrap()
+    /// ```
     pub fn get(&self, i: usize) -> Option<Match<'s, W>> {
-        self.locs
-            .get(i)
-            .map(|(s, e)| Match::new(self.subject, s, e))
+        self.locs.get(i).map(|(s, e)| Match::new(self.subject, s, e))
     }
 
     /// Returns the match for the capture group named `name`. If `name` isn't a
@@ -907,9 +1056,7 @@ impl<'s, W: CodeUnitWidth> Captures<'s, W> {
 
 impl<'s, W: CodeUnitWidth> fmt::Debug for Captures<'s, W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Captures")
-            .field(&CapturesDebug(self))
-            .finish()
+        f.debug_tuple("Captures").field(&CapturesDebug(self)).finish()
     }
 }
 
@@ -992,7 +1139,7 @@ impl<'s, 'i, W: CodeUnitWidth> Index<&'i str> for Captures<'s, W> {
 /// lifetime of the subject string.
 pub struct Matches<'r, 's, W: CodeUnitWidth> {
     re: &'r Regex<W>,
-    match_data: &'r RefCell<MatchData<W>>,
+    match_data: MatchDataPoolGuard<'r, W>,
     subject: &'s [W::SubjectChar],
     last_end: usize,
     last_match: Option<usize>,
@@ -1005,9 +1152,11 @@ impl<'r, 's, W: CodeUnitWidth> Iterator for Matches<'r, 's, W> {
         if self.last_end > self.subject.len() {
             return None;
         }
-        let res = self
-            .re
-            .find_at_with_match_data(self.match_data, self.subject, self.last_end);
+        let res = self.re.find_at_with_match_data(
+            &mut self.match_data,
+            self.subject,
+            self.last_end,
+        );
         let m = match res {
             Err(err) => return Some(Err(err)),
             Ok(None) => return None,
@@ -1053,9 +1202,8 @@ impl<'r, 's, W: CodeUnitWidth> Iterator for CaptureMatches<'r, 's, W> {
             return None;
         }
         let mut locs = self.re.capture_locations();
-        let res = self
-            .re
-            .captures_read_at(&mut locs, self.subject, self.last_end);
+        let res =
+            self.re.captures_read_at(&mut locs, self.subject, self.last_end);
         let m = match res {
             Err(err) => return Some(Err(err)),
             Ok(None) => return None,
@@ -1077,8 +1225,21 @@ impl<'r, 's, W: CodeUnitWidth> Iterator for CaptureMatches<'r, 's, W> {
         self.last_match = Some(m.end());
         Some(Ok(Captures {
             subject: self.subject,
-            locs: locs,
+            locs,
             idx: Arc::clone(&self.re.capture_names_idx),
         }))
     }
 }
+
+/// A type alias for our pool of `MatchData` that fixes the type parameters to
+/// what we actually use in practice.
+type MatchDataPool<W> = Pool<MatchData<W>, MatchDataPoolFn<W>>;
+
+/// Same as above, but for the guard returned by a pool.
+type MatchDataPoolGuard<'a, W> =
+    PoolGuard<'a, MatchData<W>, MatchDataPoolFn<W>>;
+
+/// The type of the closure we use to create new caches. We need to spell out
+/// all of the marker traits or else we risk leaking !MARKER impls.
+type MatchDataPoolFn<W> =
+    Box<dyn Fn() -> MatchData<W> + Send + Sync + UnwindSafe + RefUnwindSafe>;

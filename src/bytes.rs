@@ -1,6 +1,11 @@
 use crate::ffi::CodeUnitWidth8;
+pub use crate::regex_impl::Captures as CapturesImpl;
 pub use crate::regex_impl::Match as MatchImpl;
-use crate::regex_impl::{Regex as RegexImpl, RegexBuilder as RegexBuilderImpl};
+
+#[doc(inline)]
+pub use crate::regex_impl::{
+    Regex as RegexImpl, RegexBuilder as RegexBuilderImpl,
+};
 
 /// A compiled PCRE2 regular expression for matching bytes.
 ///
@@ -16,6 +21,19 @@ pub type RegexBuilder = RegexBuilderImpl<CodeUnitWidth8>;
 /// The lifetime parameter `'s` refers to the lifetime of the matched portion
 /// of the subject string.
 pub type Match<'s> = MatchImpl<'s, CodeUnitWidth8>;
+
+/// `Captures` represents a group of captured byte strings for a single match.
+///
+/// The 0th capture always corresponds to the entire match. Each subsequent
+/// index corresponds to the next capture group in the regex. If a capture
+/// group is named, then the matched byte string is *also* available via the
+/// `name` method. (Note that the 0th capture is always unnamed and so must be
+/// accessed with the `get` method.)
+///
+/// Positions returned from a capture group are always byte indices.
+///
+/// `'s` is the lifetime of the matched subject string.
+pub type Captures<'s> = CapturesImpl<'s, CodeUnitWidth8>;
 
 #[cfg(test)]
 mod tests {
@@ -50,11 +68,8 @@ mod tests {
         let re = RegexBuilder::new().caseless(true).build("a").unwrap();
         assert!(re.is_match(b("A")).unwrap());
 
-        let re = RegexBuilder::new()
-            .caseless(true)
-            .ucp(true)
-            .build("β")
-            .unwrap();
+        let re =
+            RegexBuilder::new().caseless(true).ucp(true).build("β").unwrap();
         assert!(re.is_match(b("Β")).unwrap());
     }
 
@@ -82,10 +97,7 @@ mod tests {
 
     #[test]
     fn multi_line() {
-        let re = RegexBuilder::new()
-            .multi_line(false)
-            .build("^abc$")
-            .unwrap();
+        let re = RegexBuilder::new().multi_line(false).build("^abc$").unwrap();
         assert!(!re.is_match(b("foo\nabc\nbar")).unwrap());
 
         let re = RegexBuilder::new().multi_line(true).build("^abc$").unwrap();
@@ -134,10 +146,8 @@ mod tests {
     // If the JIT isn't available, then in this test, we simply don't use it.
     #[test]
     fn jit_if_available() {
-        let re = RegexBuilder::new()
-            .jit_if_available(true)
-            .build(r"\w")
-            .unwrap();
+        let re =
+            RegexBuilder::new().jit_if_available(true).build(r"\w").unwrap();
         assert!(re.is_match(b("a")).unwrap());
     }
 
@@ -262,5 +272,46 @@ mod tests {
             .build(r"((((\w{10})){100}))+")
             .unwrap();
         assert!(re.is_match(hay.as_bytes()).unwrap());
+    }
+
+    #[test]
+    fn find_start_end_and_as_bytes() {
+        let hay =
+            "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let pattern = r"
+            (?x)    (?#: Allow comments and whitespace.)
+
+            [a-z]   (?#: Lowercase letter.)
+            +       (?#: One or more times.)
+            ";
+        let re = RegexBuilder::new()
+            .extended(true)
+            .utf(true)
+            .jit_if_available(true)
+            .build(pattern)
+            .unwrap();
+        let matched = re.find(hay.as_bytes()).unwrap().unwrap();
+        assert_eq!(matched.start(), 10);
+        assert_eq!(matched.end(), 10 + 26);
+        assert_eq!(matched.as_bytes(), b"abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn find_utf_emoji_as_bytes() {
+        let hay = "0123456789😀👍🏼🎉abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let pattern = r"(*UTF)
+            (?x)    (?#: Allow comments and whitespace.)
+
+            [^\N{U+0000}-\N{U+007F}]    (?#: Non-ascii code points.)
+            +                           (?#: One or more times.)
+            ";
+        let re = RegexBuilder::new()
+            .extended(true)
+            .utf(true)
+            .jit_if_available(true)
+            .build(pattern)
+            .unwrap();
+        let matched = re.find(hay.as_bytes()).unwrap().unwrap();
+        assert_eq!(matched.as_bytes(), "😀👍🏼🎉".as_bytes());
     }
 }

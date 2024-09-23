@@ -24,7 +24,9 @@ fn itworks() {
         );
     }
 
-    let match_data = unsafe { pcre2_match_data_create_from_pattern_8(code, ptr::null_mut()) };
+    let match_data = unsafe {
+        pcre2_match_data_create_from_pattern_8(code, ptr::null_mut())
+    };
     if match_data.is_null() {
         unsafe {
             pcre2_code_free_8(code);

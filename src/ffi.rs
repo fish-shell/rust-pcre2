@@ -5,15 +5,14 @@ unsafety, but this layer will take care of the obvious things, such as
 resource management and error handling.
 */
 
-use std::cmp;
-use std::marker::PhantomData;
-use std::ptr;
-use std::slice;
-
-use libc::c_void;
-use pcre2_sys::*;
-
 use crate::error::Error;
+use std::{
+    cmp,
+    marker::PhantomData,
+    panic::{RefUnwindSafe, UnwindSafe},
+    ptr, slice,
+};
+use {libc::c_void, pcre2_sys::*};
 
 pub trait NameTableEntry {
     /// The index of the named subpattern.
@@ -23,7 +22,7 @@ pub trait NameTableEntry {
     fn name(&self) -> String;
 }
 
-#[cfg(feature = "utf8")]
+#[allow(non_camel_case_types)]
 #[repr(C)]
 pub struct name_table_entry_8 {
     match_index_msb: u8,
@@ -34,17 +33,17 @@ pub struct name_table_entry_8 {
     name: u8,
 }
 
-#[cfg(feature = "utf32")]
+#[allow(non_camel_case_types)]
 #[repr(C)]
 pub struct name_table_entry_32 {
     match_index: u32,
     name: u32, // See above re: flexible array member
 }
 
-#[cfg(feature = "utf8")]
 impl NameTableEntry for name_table_entry_8 {
     fn index(&self) -> usize {
-        ((self.match_index_msb as usize) << 8) | (self.match_index_lsb as usize)
+        ((self.match_index_msb as usize) << 8)
+            | (self.match_index_lsb as usize)
     }
 
     fn name(&self) -> String {
@@ -59,7 +58,6 @@ impl NameTableEntry for name_table_entry_8 {
     }
 }
 
-#[cfg(feature = "utf32")]
 impl NameTableEntry for name_table_entry_32 {
     fn index(&self) -> usize {
         self.match_index as usize
@@ -84,24 +82,31 @@ impl NameTableEntry for name_table_entry_32 {
 }
 
 #[allow(non_camel_case_types)]
-pub trait CodeUnitWidth: std::fmt::Debug {
-    type pcre2_code;
-    type pcre2_compile_context;
+pub trait CodeUnitWidth: std::fmt::Debug + 'static {
+    type pcre2_code: UnwindSafe + RefUnwindSafe;
+    type pcre2_compile_context: UnwindSafe + RefUnwindSafe;
     type pcre2_match_context;
     type pcre2_match_data;
     type pcre2_jit_stack;
     type PCRE2_CHAR: Default + Copy + TryInto<Self::SubjectChar>;
     type PCRE2_SPTR;
     type name_table_entry: NameTableEntry;
-    type SubjectChar: Copy;
+    type SubjectChar: Copy + Default;
     type Pattern: Clone + std::fmt::Debug;
 
     fn escape_subject(subject: &[Self::SubjectChar]) -> String;
 
-    fn pattern_to_sptr_len(pattern: &Self::Pattern) -> (Self::PCRE2_SPTR, usize);
-    fn subject_to_sptr_len(subject: &[Self::SubjectChar]) -> (Self::PCRE2_SPTR, usize);
+    fn pattern_to_sptr_len(
+        pattern: &Self::Pattern,
+    ) -> (Self::PCRE2_SPTR, usize);
+    fn subject_to_sptr_len(
+        subject: &[Self::SubjectChar],
+    ) -> (Self::PCRE2_SPTR, usize);
 
-    unsafe fn pcre2_config(arg1: u32, arg2: *mut ::libc::c_void) -> ::libc::c_int;
+    unsafe fn pcre2_config(
+        arg1: u32,
+        arg2: *mut ::libc::c_void,
+    ) -> ::libc::c_int;
     unsafe fn pcre2_code_free(arg1: *mut Self::pcre2_code);
     unsafe fn pcre2_compile(
         arg1: Self::PCRE2_SPTR,
@@ -131,7 +136,10 @@ pub trait CodeUnitWidth: std::fmt::Debug {
         arg1: ::libc::size_t,
         arg2: ::libc::size_t,
     ) -> *mut Self::pcre2_jit_stack;
-    unsafe fn pcre2_jit_compile(arg1: *mut Self::pcre2_code, arg2: u32) -> ::libc::c_int;
+    unsafe fn pcre2_jit_compile(
+        arg1: *mut Self::pcre2_code,
+        arg2: u32,
+    ) -> ::libc::c_int;
     unsafe fn pcre2_jit_stack_assign(
         arg1: *mut Self::pcre2_match_context,
         arg3: *mut ::libc::c_void,
@@ -139,9 +147,13 @@ pub trait CodeUnitWidth: std::fmt::Debug {
     unsafe fn pcre2_jit_stack_free(arg1: *mut Self::pcre2_jit_stack);
 
     unsafe fn pcre2_compile_context_create() -> *mut Self::pcre2_compile_context;
-    unsafe fn pcre2_set_newline(arg1: *mut Self::pcre2_compile_context, arg2: u32)
-        -> ::libc::c_int;
-    unsafe fn pcre2_compile_context_free(arg1: *mut Self::pcre2_compile_context);
+    unsafe fn pcre2_set_newline(
+        arg1: *mut Self::pcre2_compile_context,
+        arg2: u32,
+    ) -> ::libc::c_int;
+    unsafe fn pcre2_compile_context_free(
+        arg1: *mut Self::pcre2_compile_context,
+    );
 
     unsafe fn pcre2_match_context_create() -> *mut Self::pcre2_match_context;
     unsafe fn pcre2_match_context_free(arg1: *mut Self::pcre2_match_context);
@@ -151,8 +163,12 @@ pub trait CodeUnitWidth: std::fmt::Debug {
     ) -> *mut Self::pcre2_match_data;
     unsafe fn pcre2_match_data_free(arg1: *mut Self::pcre2_match_data);
 
-    unsafe fn pcre2_get_ovector_pointer(arg1: *mut Self::pcre2_match_data) -> *mut usize;
-    unsafe fn pcre2_get_ovector_count(arg1: *mut Self::pcre2_match_data) -> u32;
+    unsafe fn pcre2_get_ovector_pointer(
+        arg1: *mut Self::pcre2_match_data,
+    ) -> *mut usize;
+    unsafe fn pcre2_get_ovector_count(
+        arg1: *mut Self::pcre2_match_data,
+    ) -> u32;
 
     unsafe fn pcre2_substitute(
         code: *const Self::pcre2_code,
@@ -169,11 +185,9 @@ pub trait CodeUnitWidth: std::fmt::Debug {
     ) -> ::libc::c_int;
 }
 
-#[cfg(feature = "utf8")]
 #[derive(Debug)]
 pub struct CodeUnitWidth8;
 
-#[cfg(feature = "utf8")]
 impl CodeUnitWidth for CodeUnitWidth8 {
     type pcre2_code = pcre2_code_8;
     type PCRE2_CHAR = PCRE2_UCHAR8;
@@ -197,15 +211,22 @@ impl CodeUnitWidth for CodeUnitWidth8 {
         s
     }
 
-    fn pattern_to_sptr_len(pattern: &Self::Pattern) -> (Self::PCRE2_SPTR, usize) {
+    fn pattern_to_sptr_len(
+        pattern: &Self::Pattern,
+    ) -> (Self::PCRE2_SPTR, usize) {
         (pattern.as_ptr(), pattern.len())
     }
 
-    fn subject_to_sptr_len(subject: &[Self::SubjectChar]) -> (Self::PCRE2_SPTR, usize) {
+    fn subject_to_sptr_len(
+        subject: &[Self::SubjectChar],
+    ) -> (Self::PCRE2_SPTR, usize) {
         (subject.as_ptr(), subject.len())
     }
 
-    unsafe fn pcre2_config(arg1: u32, arg2: *mut ::libc::c_void) -> ::libc::c_int {
+    unsafe fn pcre2_config(
+        arg1: u32,
+        arg2: *mut ::libc::c_void,
+    ) -> ::libc::c_int {
         pcre2_config_8(arg1, arg2)
     }
     unsafe fn pcre2_code_free(arg1: *mut Self::pcre2_code) {
@@ -228,7 +249,10 @@ impl CodeUnitWidth for CodeUnitWidth8 {
     ) -> *mut Self::pcre2_jit_stack {
         pcre2_jit_stack_create_8(arg1, arg2, ptr::null_mut())
     }
-    unsafe fn pcre2_jit_compile(arg1: *mut Self::pcre2_code, arg2: u32) -> ::libc::c_int {
+    unsafe fn pcre2_jit_compile(
+        arg1: *mut Self::pcre2_code,
+        arg2: u32,
+    ) -> ::libc::c_int {
         pcre2_jit_compile_8(arg1, arg2)
     }
     unsafe fn pcre2_jit_stack_assign(
@@ -261,7 +285,8 @@ impl CodeUnitWidth for CodeUnitWidth8 {
         pcre2_match_8(arg1, arg2, arg3, arg4, arg5, arg6, arg7)
     }
 
-    unsafe fn pcre2_compile_context_create() -> *mut Self::pcre2_compile_context {
+    unsafe fn pcre2_compile_context_create() -> *mut Self::pcre2_compile_context
+    {
         pcre2_compile_context_create_8(ptr::null_mut())
     }
     unsafe fn pcre2_match_context_free(arg1: *mut Self::pcre2_match_context) {
@@ -274,7 +299,9 @@ impl CodeUnitWidth for CodeUnitWidth8 {
     ) -> ::libc::c_int {
         pcre2_set_newline_8(arg1, arg2)
     }
-    unsafe fn pcre2_compile_context_free(arg1: *mut Self::pcre2_compile_context) {
+    unsafe fn pcre2_compile_context_free(
+        arg1: *mut Self::pcre2_compile_context,
+    ) {
         pcre2_compile_context_free_8(arg1)
     }
     unsafe fn pcre2_match_context_create() -> *mut Self::pcre2_match_context {
@@ -290,10 +317,14 @@ impl CodeUnitWidth for CodeUnitWidth8 {
         pcre2_match_data_free_8(arg1)
     }
 
-    unsafe fn pcre2_get_ovector_pointer(arg1: *mut Self::pcre2_match_data) -> *mut usize {
+    unsafe fn pcre2_get_ovector_pointer(
+        arg1: *mut Self::pcre2_match_data,
+    ) -> *mut usize {
         pcre2_get_ovector_pointer_8(arg1)
     }
-    unsafe fn pcre2_get_ovector_count(arg1: *mut Self::pcre2_match_data) -> u32 {
+    unsafe fn pcre2_get_ovector_count(
+        arg1: *mut Self::pcre2_match_data,
+    ) -> u32 {
         pcre2_get_ovector_count_8(arg1)
     }
     unsafe fn pcre2_substitute(
@@ -325,11 +356,9 @@ impl CodeUnitWidth for CodeUnitWidth8 {
     }
 }
 
-#[cfg(feature = "utf32")]
 #[derive(Debug)]
 pub struct CodeUnitWidth32;
 
-#[cfg(feature = "utf32")]
 impl CodeUnitWidth for CodeUnitWidth32 {
     type pcre2_code = pcre2_code_32;
     type PCRE2_CHAR = PCRE2_UCHAR32;
@@ -357,15 +386,22 @@ impl CodeUnitWidth for CodeUnitWidth32 {
         s
     }
 
-    fn pattern_to_sptr_len(pattern: &Self::Pattern) -> (Self::PCRE2_SPTR, usize) {
+    fn pattern_to_sptr_len(
+        pattern: &Self::Pattern,
+    ) -> (Self::PCRE2_SPTR, usize) {
         (pattern.as_ptr() as *const u32, pattern.len())
     }
 
-    fn subject_to_sptr_len(subject: &[Self::SubjectChar]) -> (Self::PCRE2_SPTR, usize) {
+    fn subject_to_sptr_len(
+        subject: &[Self::SubjectChar],
+    ) -> (Self::PCRE2_SPTR, usize) {
         (subject.as_ptr() as *const u32, subject.len())
     }
 
-    unsafe fn pcre2_config(arg1: u32, arg2: *mut ::libc::c_void) -> ::libc::c_int {
+    unsafe fn pcre2_config(
+        arg1: u32,
+        arg2: *mut ::libc::c_void,
+    ) -> ::libc::c_int {
         pcre2_config_32(arg1, arg2)
     }
     unsafe fn pcre2_code_free(arg1: *mut Self::pcre2_code) {
@@ -388,7 +424,10 @@ impl CodeUnitWidth for CodeUnitWidth32 {
     ) -> *mut Self::pcre2_jit_stack {
         pcre2_jit_stack_create_32(arg1, arg2, ptr::null_mut())
     }
-    unsafe fn pcre2_jit_compile(arg1: *mut Self::pcre2_code, arg2: u32) -> ::libc::c_int {
+    unsafe fn pcre2_jit_compile(
+        arg1: *mut Self::pcre2_code,
+        arg2: u32,
+    ) -> ::libc::c_int {
         pcre2_jit_compile_32(arg1, arg2)
     }
     unsafe fn pcre2_jit_stack_assign(
@@ -421,7 +460,8 @@ impl CodeUnitWidth for CodeUnitWidth32 {
         pcre2_match_32(arg1, arg2, arg3, arg4, arg5, arg6, arg7)
     }
 
-    unsafe fn pcre2_compile_context_create() -> *mut Self::pcre2_compile_context {
+    unsafe fn pcre2_compile_context_create() -> *mut Self::pcre2_compile_context
+    {
         pcre2_compile_context_create_32(ptr::null_mut())
     }
     unsafe fn pcre2_match_context_free(arg1: *mut Self::pcre2_match_context) {
@@ -434,7 +474,9 @@ impl CodeUnitWidth for CodeUnitWidth32 {
     ) -> ::libc::c_int {
         pcre2_set_newline_32(arg1, arg2)
     }
-    unsafe fn pcre2_compile_context_free(arg1: *mut Self::pcre2_compile_context) {
+    unsafe fn pcre2_compile_context_free(
+        arg1: *mut Self::pcre2_compile_context,
+    ) {
         pcre2_compile_context_free_32(arg1)
     }
     unsafe fn pcre2_match_context_create() -> *mut Self::pcre2_match_context {
@@ -450,10 +492,14 @@ impl CodeUnitWidth for CodeUnitWidth32 {
         pcre2_match_data_free_32(arg1)
     }
 
-    unsafe fn pcre2_get_ovector_pointer(arg1: *mut Self::pcre2_match_data) -> *mut usize {
+    unsafe fn pcre2_get_ovector_pointer(
+        arg1: *mut Self::pcre2_match_data,
+    ) -> *mut usize {
         pcre2_get_ovector_pointer_32(arg1)
     }
-    unsafe fn pcre2_get_ovector_count(arg1: *mut Self::pcre2_match_data) -> u32 {
+    unsafe fn pcre2_get_ovector_count(
+        arg1: *mut Self::pcre2_match_data,
+    ) -> u32 {
         pcre2_get_ovector_count_32(arg1)
     }
 
@@ -489,7 +535,9 @@ impl CodeUnitWidth for CodeUnitWidth32 {
 /// Returns true if and only if PCRE2 believes that JIT is available.
 pub fn is_jit_available<W: CodeUnitWidth>() -> bool {
     let mut rc: u32 = 0;
-    let error_code = unsafe { W::pcre2_config(PCRE2_CONFIG_JIT, &mut rc as *mut _ as *mut c_void) };
+    let error_code = unsafe {
+        W::pcre2_config(PCRE2_CONFIG_JIT, &mut rc as *mut _ as *mut c_void)
+    };
     if error_code < 0 {
         // If PCRE2_CONFIG_JIT is a bad option, then there's a bug somewhere.
         panic!("BUG: {}", Error::jit(error_code));
@@ -505,8 +553,36 @@ pub fn version() -> (u32, u32) {
     (PCRE2_MAJOR, PCRE2_MINOR)
 }
 
+/// Escapes all regular expression meta characters in `pattern`.
+///
+/// The string returned may be safely used as a literal in a regular
+/// expression.
+pub fn escape(pattern: &str) -> String {
+    fn is_meta_character(c: char) -> bool {
+        match c {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']'
+            | '{' | '}' | '^' | '$' | '#' | '-' => true,
+            _ => false,
+        }
+    }
+
+    // Is it really true that PCRE2 doesn't have an API routine to
+    // escape a pattern so that it matches literally? Wow. I couldn't
+    // find one. It does of course have \Q...\E, but, umm, what if the
+    // literal contains a \E?
+    let mut quoted = String::new();
+    quoted.reserve(pattern.len());
+    for c in pattern.chars() {
+        if is_meta_character(c) {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted
+}
+
 /// A low level representation of a compiled PCRE2 code object.
-pub struct Code<W: CodeUnitWidth> {
+pub(crate) struct Code<W: CodeUnitWidth> {
     code: *mut W::pcre2_code,
     compiled_jit: bool,
     // We hang on to this but don't use it so that it gets freed when the
@@ -534,7 +610,7 @@ impl<W: CodeUnitWidth> Drop for Code<W> {
 impl<W: CodeUnitWidth> Code<W> {
     /// Compile the given pattern with the given options. If there was a
     /// problem compiling the pattern, then return an error.
-    pub fn new(
+    pub(crate) fn new(
         pattern: &W::Pattern,
         options: u32,
         mut ctx: CompileContext<W>,
@@ -555,11 +631,7 @@ impl<W: CodeUnitWidth> Code<W> {
         if code.is_null() {
             Err(Error::compile(error_code, error_offset))
         } else {
-            Ok(Code {
-                code,
-                compiled_jit: false,
-                ctx,
-            })
+            Ok(Code { code, compiled_jit: false, ctx })
         }
     }
 
@@ -567,8 +639,9 @@ impl<W: CodeUnitWidth> Code<W> {
     ///
     /// If there was a problem performing JIT compilation, then this returns
     /// an error.
-    pub fn jit_compile(&mut self) -> Result<(), Error> {
-        let error_code = unsafe { W::pcre2_jit_compile(self.code, PCRE2_JIT_COMPLETE) };
+    pub(crate) fn jit_compile(&mut self) -> Result<(), Error> {
+        let error_code =
+            unsafe { W::pcre2_jit_compile(self.code, PCRE2_JIT_COMPLETE) };
         if error_code == 0 {
             self.compiled_jit = true;
             Ok(())
@@ -586,7 +659,13 @@ impl<W: CodeUnitWidth> Code<W> {
     ///
     /// If there was a problem querying the compiled object for information,
     /// then this returns an error.
-    pub fn capture_names(&self) -> Result<Vec<Option<String>>, Error> {
+    pub(crate) fn capture_names(&self) -> Result<Vec<Option<String>>, Error> {
+        // This is an object lesson in why C sucks. All we need is a map from
+        // a name to a number, but we need to go through all sorts of
+        // shenanigans to get it. In order to verify this code, see
+        // https://www.pcre.org/current/doc/html/pcre2api.html
+        // and search for PCRE2_INFO_NAMETABLE.
+
         let name_count = self.name_count()?;
         let name_entry_size_in_bytes =
             self.name_entry_size()? * std::mem::size_of::<W::PCRE2_CHAR>();
@@ -607,7 +686,7 @@ impl<W: CodeUnitWidth> Code<W> {
     }
 
     /// Return the underlying raw pointer to the code object.
-    pub fn as_ptr(&self) -> *const W::pcre2_code {
+    pub(crate) fn as_ptr(&self) -> *const W::pcre2_code {
         self.code
     }
 
@@ -667,7 +746,7 @@ impl<W: CodeUnitWidth> Code<W> {
     /// Returns the total number of capturing groups in this regex. This
     /// includes the capturing group for the entire pattern, so that this is
     /// always 1 more than the number of syntactic groups in the pattern.
-    pub fn capture_count(&self) -> Result<usize, Error> {
+    pub(crate) fn capture_count(&self) -> Result<usize, Error> {
         let mut count: u32 = 0;
         let rc = unsafe {
             W::pcre2_pattern_info(
@@ -732,7 +811,9 @@ impl<W: CodeUnitWidth> Code<W> {
 }
 
 /// A low level representation of PCRE2's compilation context.
-pub struct CompileContext<W: CodeUnitWidth>(*mut W::pcre2_compile_context);
+pub(crate) struct CompileContext<W: CodeUnitWidth>(
+    *mut W::pcre2_compile_context,
+);
 
 // SAFETY: Compile contexts are safe to read from multiple threads
 // simultaneously. No interior mutability is used, so Sync is safe.
@@ -749,7 +830,7 @@ impl<W: CodeUnitWidth> CompileContext<W> {
     /// Create a new empty compilation context.
     ///
     /// If memory could not be allocated for the context, then this panics.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let ctx = unsafe { W::pcre2_compile_context_create() };
         assert!(!ctx.is_null(), "could not allocate compile context");
         CompileContext(ctx)
@@ -760,7 +841,7 @@ impl<W: CodeUnitWidth> CompileContext<W> {
     /// Valid values are: PCRE2_NEWLINE_CR, PCRE2_NEWLINE_LF,
     /// PCRE2_NEWLINE_CRLF, PCRE2_NEWLINE_ANYCRLF, PCRE2_NEWLINE_ANY or
     /// PCRE2_NEWLINE_NUL. Using any other value results in an error.
-    pub fn set_newline(&mut self, value: u32) -> Result<(), Error> {
+    pub(crate) fn set_newline(&mut self, value: u32) -> Result<(), Error> {
         let rc = unsafe { W::pcre2_set_newline(self.0, value) };
         if rc == 0 {
             Ok(())
@@ -776,17 +857,15 @@ impl<W: CodeUnitWidth> CompileContext<W> {
 
 /// Configuration for PCRE2's match context.
 #[derive(Clone, Debug)]
-pub struct MatchConfig {
+pub(crate) struct MatchConfig {
     /// When set, a custom JIT stack will be created with the given maximum
     /// size.
-    pub max_jit_stack_size: Option<usize>,
+    pub(crate) max_jit_stack_size: Option<usize>,
 }
 
 impl Default for MatchConfig {
     fn default() -> MatchConfig {
-        MatchConfig {
-            max_jit_stack_size: None,
-        }
+        MatchConfig { max_jit_stack_size: None }
     }
 }
 
@@ -795,7 +874,7 @@ impl Default for MatchConfig {
 /// Technically, a single match data block can be used with multiple regexes
 /// (not simultaneously), but in practice, we just create a single match data
 /// block for each regex for each thread it's used in.
-pub struct MatchData<W: CodeUnitWidth> {
+pub(crate) struct MatchData<W: CodeUnitWidth> {
     config: MatchConfig,
     match_context: *mut W::pcre2_match_context,
     match_data: *mut W::pcre2_match_data,
@@ -830,21 +909,29 @@ impl<W: CodeUnitWidth> MatchData<W> {
     /// Create a new match data block from a compiled PCRE2 code object.
     ///
     /// This panics if memory could not be allocated for the block.
-    pub fn new(config: MatchConfig, code: &Code<W>) -> MatchData<W> {
+    pub(crate) fn new(config: MatchConfig, code: &Code<W>) -> MatchData<W> {
         let match_context = unsafe { W::pcre2_match_context_create() };
         assert!(!match_context.is_null(), "failed to allocate match context");
 
-        let match_data = unsafe { W::pcre2_match_data_create_from_pattern(code.as_ptr()) };
+        let match_data =
+            unsafe { W::pcre2_match_data_create_from_pattern(code.as_ptr()) };
         assert!(!match_data.is_null(), "failed to allocate match data block");
 
         let jit_stack = match config.max_jit_stack_size {
             None => None,
             Some(_) if !code.compiled_jit => None,
             Some(max) => {
-                let stack = unsafe { W::pcre2_jit_stack_create(cmp::min(max, 32 * 1 << 10), max) };
+                let stack = unsafe {
+                    W::pcre2_jit_stack_create(cmp::min(max, 32 * 1 << 10), max)
+                };
                 assert!(!stack.is_null(), "failed to allocate JIT stack");
 
-                unsafe { W::pcre2_jit_stack_assign(match_context, stack as *mut c_void) };
+                unsafe {
+                    W::pcre2_jit_stack_assign(
+                        match_context,
+                        stack as *mut c_void,
+                    )
+                };
                 Some(stack)
             }
         };
@@ -864,7 +951,7 @@ impl<W: CodeUnitWidth> MatchData<W> {
     }
 
     /// Return the configuration for this match data object.
-    pub fn config(&self) -> &MatchConfig {
+    pub(crate) fn config(&self) -> &MatchConfig {
         &self.config
     }
 
@@ -883,22 +970,39 @@ impl<W: CodeUnitWidth> MatchData<W> {
     /// behavior when not used correctly. For example, if PCRE2_NO_UTF_CHECK
     /// is given and UTF mode is enabled and the given subject string is not
     /// valid UTF-8, then the result is undefined.
-    pub unsafe fn find(
+    pub(crate) unsafe fn find(
         &mut self,
         code: &Code<W>,
-        mut subject: &[W::SubjectChar],
+        subject: &[W::SubjectChar],
         start: usize,
         options: u32,
     ) -> Result<bool, Error> {
-        // When the subject is empty, we use an empty slice
-        // with a known valid pointer. Otherwise, slices derived
-        // from, e.g., an empty `Vec<u8>` may not have a valid
-        // pointer, since creating an empty `Vec` is guaranteed
-        // to not allocate.
-        if subject.is_empty() {
-            subject = &[];
-        }
-        let (subj_ptr, subj_len) = W::subject_to_sptr_len(subject);
+        // When the subject is empty, we use an NON-empty slice with a known
+        // valid pointer. Otherwise, slices derived from, e.g., an empty
+        // `Vec<u8>` may not have a valid pointer, since creating an empty
+        // `Vec` is guaranteed to not allocate.
+        //
+        // We use a non-empty slice since it is otherwise difficult
+        // to guarantee getting a dereferencable pointer. Which makes
+        // sense, because the slice is empty, the pointer should never be
+        // dereferenced!
+        //
+        // Alas, older versions of PCRE2 did exactly this. While that bug has
+        // been fixed a while ago, it still seems to pop up[1]. So we try
+        // harder.
+        //
+        // Note that even though we pass a non-empty slice in this case, we
+        // still pass a length of zero. This just provides a pointer that won't
+        // explode if you try to dereference it.
+        //
+        // [1]: https://github.com/BurntSushi/rust-pcre2/issues/42
+        let singleton: W::SubjectChar = Default::default();
+        let (subj_ptr, subj_len) = if subject.is_empty() {
+            let ptr = W::subject_to_sptr_len(slice::from_ref(&singleton)).0;
+            (ptr, 0)
+        } else {
+            W::subject_to_sptr_len(subject)
+        };
 
         let rc = W::pcre2_match(
             code.as_ptr(),
@@ -927,12 +1031,22 @@ impl<W: CodeUnitWidth> MatchData<W> {
     /// The ovector represents match offsets as pairs. This always returns
     /// N + 1 pairs (so 2*N + 1 offsets), where N is the number of capturing
     /// groups in the original regex.
-    pub fn ovector(&self) -> &[usize] {
+    pub(crate) fn ovector(&self) -> &[usize] {
         // SAFETY: Both our ovector pointer and count are derived directly from
         // the creation of a valid match data block. One interesting question
         // here is whether the contents of the ovector are always initialized.
         // The PCRE2 documentation suggests that they are (so does testing),
         // but this isn't actually 100% clear!
-        unsafe { slice::from_raw_parts(self.ovector_ptr, self.ovector_count as usize * 2) }
+        unsafe {
+            slice::from_raw_parts(
+                self.ovector_ptr,
+                // This could in theory overflow, but the ovector count comes
+                // directly from PCRE2, so presumably it's guaranteed to never
+                // overflow size_t/usize. Also, in practice, this would require
+                // a number of capture groups so large as to be probably
+                // impossible.
+                self.ovector_count as usize * 2,
+            )
+        }
     }
 }

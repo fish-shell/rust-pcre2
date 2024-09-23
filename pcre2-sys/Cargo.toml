@@ -1,26 +1,24 @@
 [package]
 name = "pcre2-sys"
-version = "0.2.4"  #:version
-authors = ["Andrew Gallant <jamslam@gmail.com>"]
+version = "0.2.9"  #:version
+authors = ["Andrew Gallant <jamslam@gmail.com>", "fish-shell contributors"]
 description = "Low level bindings to PCRE2."
 documentation = "https://docs.rs/pcre2-sys"
-homepage = "https://github.com/BurntSushi/rust-pcre2"
-repository = "https://github.com/BurntSushi/rust-pcre2"
+homepage = "https://github.com/fish-shell/rust-pcre2"
+repository = "https://github.com/fish-shell/rust-pcre2"
 readme = "README.md"
 keywords = ["pcre", "pcre2", "regex", "jit"]
-license = "Unlicense/MIT"
+license = "Unlicense OR MIT"
 categories = ["external-ffi-bindings"]
-edition = "2018"
-
-[features]
-default = ["utf8"]
-utf8 = []
-utf32 = []
-
+edition = "2021"
 
 [dependencies]
-libc = "0.2"
+libc = "0.2.146"
 
 [build-dependencies]
-cc = { version = "1", features = ["parallel"] }
-pkg-config = "0.3.13"
+cc = { version = "1.0.73", features = ["parallel"] }
+pkg-config = "0.3.27"
+
+[features]
+utf32 = []
+jit = []

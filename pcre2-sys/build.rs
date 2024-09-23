@@ -5,7 +5,7 @@
 //   2. Otherwise, statically build PCRE2 by hand.
 //
 // For step 1, we permit opting out of using the system library via either
-// explicitly setting the static-pcre2 feature, or if we
+// explicitly setting the PCRE2_SYS_STATIC environment variable or if we
 // otherwise believe we want a static build (e.g., when building with MUSL).
 //
 // For step 2, we roughly follow the directions as laid out in
@@ -19,47 +19,13 @@
 // platform detection for the various PCRE2 settings, but this should work
 // as-is on Windows, Linux and macOS.
 
-extern crate cc;
-extern crate pkg_config;
+use std::path::PathBuf;
 
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
-// Files that PCRE2 needs to compile.
-const FILES: &'static [&'static str] = &[
-    "pcre2_auto_possess.c",
-    "pcre2_compile.c",
-    "pcre2_config.c",
-    "pcre2_context.c",
-    "pcre2_convert.c",
-    "pcre2_dfa_match.c",
-    "pcre2_error.c",
-    "pcre2_extuni.c",
-    "pcre2_find_bracket.c",
-    "pcre2_jit_compile.c",
-    "pcre2_maketables.c",
-    "pcre2_match.c",
-    "pcre2_match_data.c",
-    "pcre2_newline.c",
-    "pcre2_ord2utf.c",
-    "pcre2_pattern_info.c",
-    "pcre2_serialize.c",
-    "pcre2_string_utils.c",
-    "pcre2_study.c",
-    "pcre2_substitute.c",
-    "pcre2_substring.c",
-    "pcre2_tables.c",
-    "pcre2_ucd.c",
-    "pcre2_valid_utf.c",
-    "pcre2_xclass.c",
-];
-
+// Build and link against a PCRE2 library with the given code unit width,
+// which should be "8" or "32".
 fn build_1_pcre2_lib(code_unit_width: &str) {
-    let target = env::var("TARGET").unwrap();
-    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-
+    let target = std::env::var("TARGET").unwrap();
+    let upstream = PathBuf::from("upstream");
     // Set some config options. We mostly just use the default values. We do
     // this in lieu of patching config.h since it's easier.
     let mut builder = cc::Build::new();
@@ -67,117 +33,96 @@ fn build_1_pcre2_lib(code_unit_width: &str) {
         .define("PCRE2_CODE_UNIT_WIDTH", code_unit_width)
         .define("HAVE_STDLIB_H", "1")
         .define("HAVE_MEMMOVE", "1")
-        .define("HEAP_LIMIT", "20000000")
-        .define("LINK_SIZE", "2")
-        .define("MATCH_LIMIT", "10000000")
-        .define("MATCH_LIMIT_DEPTH", "10000000")
-        .define("MAX_NAME_COUNT", "10000")
-        .define("MAX_NAME_SIZE", "32")
-        .define("NEWLINE_DEFAULT", "2")
-        .define("PARENS_NEST_LIMIT", "250")
+        .define("HAVE_CONFIG_H", "1")
         .define("PCRE2_STATIC", "1")
         .define("STDC_HEADERS", "1")
-        .define("SUPPORT_PCRE2_8", "1")
-        .define("SUPPORT_PCRE2_32", "1")
+        .define(&format!("SUPPORT_PCRE2_{}", code_unit_width), "1")
         .define("SUPPORT_UNICODE", "1");
     if target.contains("windows") {
         builder.define("HAVE_WINDOWS_H", "1");
     }
-
-    // jit disabled as fish does not want it.
-    // enable_jit(&target, &mut builder);
-
-    // Copy PCRE2 headers. Typically, `./configure` would do this for us
-    // automatically, but since we're compiling by hand, we do it ourselves.
-    let include = out.join("include");
-    fs::create_dir_all(&include).unwrap();
-    fs::copy("pcre2/src/config.h.generic", include.join("config.h")).unwrap();
-    fs::copy("pcre2/src/pcre2.h.generic", include.join("pcre2.h")).unwrap();
-
-    // Same deal for chartables. Just use the default.
-    let src = out.join("src");
-    fs::create_dir_all(&src).unwrap();
-    fs::copy(
-        "pcre2/src/pcre2_chartables.c.dist",
-        src.join("pcre2_chartables.c"),
-    )
-    .unwrap();
-
-    // Build everything.
-    builder
-        .include("pcre2/src")
-        .include(&include)
-        .file(src.join("pcre2_chartables.c"));
-    for file in FILES {
-        builder.file(Path::new("pcre2/src").join(file));
+    if feature_enabled("JIT") {
+        enable_jit(&target, &mut builder);
     }
 
-    if env::var("PCRE2_SYS_DEBUG").unwrap_or(String::new()) == "1" {
+    builder.include(upstream.join("src")).include(upstream.join("include"));
+    for result in std::fs::read_dir(upstream.join("src")).unwrap() {
+        let dent = result.unwrap();
+        let path = dent.path();
+        if path.extension().map_or(true, |ext| ext != "c") {
+            continue;
+        }
+        // Apparently PCRE2 doesn't want to compile these directly, but only as
+        // included from pcre2_jit_compile.c.
+        //
+        // ... and also pcre2_ucptables.c, which is included by pcre2_tables.c.
+        // This is despite NON-AUTOTOOLS-BUILD instructions saying that
+        // pcre2_ucptables.c should be compiled directly.
+        if path.ends_with("pcre2_jit_match.c")
+            || path.ends_with("pcre2_jit_misc.c")
+            || path.ends_with("pcre2_ucptables.c")
+        {
+            continue;
+        }
+        builder.file(path);
+    }
+
+    if std::env::var("PCRE2_SYS_DEBUG").unwrap_or(String::new()) == "1"
+        || std::env::var("DEBUG").unwrap_or(String::new()) == "1"
+    {
         builder.debug(true);
     }
-    let output_name = format!("libpcre2-{}", code_unit_width);
-    builder.compile(&output_name);
+    builder.compile(&format!("libpcre2-{}.a", code_unit_width));
 }
 
+fn main() {
+    println!("cargo:rerun-if-env-changed=PCRE2_SYS_STATIC");
+
+    let target = std::env::var("TARGET").unwrap();
+    let do_utf32 = feature_enabled("UTF32");
+
+    // Don't link to a system library if we want a static build.
+    let want_static = pcre2_sys_static().unwrap_or(target.contains("musl"));
+    if want_static || pkg_config::probe_library("libpcre2-8").is_err() {
+        build_1_pcre2_lib("8");
+    }
+    if do_utf32
+        && (want_static || pkg_config::probe_library("libpcre2-32").is_err())
+    {
+        build_1_pcre2_lib("32");
+    }
+}
+
+// Return whether a given feature is enabled.
 fn feature_enabled(feature: &str) -> bool {
     let env_var_name = format!("CARGO_FEATURE_{}", feature);
-    match env::var(&env_var_name) {
+    match std::env::var(&env_var_name) {
         Ok(s) => s == "1",
         Err(_) => false,
     }
 }
 
-fn main() {
-    let do_utf8 = feature_enabled("UTF8");
-    let do_utf32 = feature_enabled("UTF32");
-    let wants_static = feature_enabled("STATIC_PCRE2");
-
-    if !do_utf8 && !do_utf32 {
-        panic!("Must enable at least one of the UTF8 or UTF32 features");
+fn pcre2_sys_static() -> Option<bool> {
+    match std::env::var("PCRE2_SYS_STATIC") {
+        Err(_) => None,
+        Ok(s) => {
+            if s == "1" {
+                Some(true)
+            } else if s == "0" {
+                Some(false)
+            } else {
+                None
+            }
+        }
     }
-
-    println!("cargo:rerun-if-env-changed=PCRE2_SYS_STATIC");
-    let target = env::var("TARGET").unwrap();
-
-    // Don't link to a system library if we want a static build.
-    let do_static = wants_static
-        || target.contains("musl")
-        || (do_utf8 && pkg_config::probe_library("libpcre2-8").is_err())
-        || (do_utf32 && pkg_config::probe_library("libpcre2-32").is_err());
-    if !do_static {
-        return;
-    }
-
-    // For a static build, make sure our PCRE2 submodule has been loaded.
-    if has_git() && !Path::new("pcre2/.git").exists() {
-        Command::new("git")
-            .args(&["submodule", "update", "--init"])
-            .status()
-            .unwrap();
-    }
-
-    if do_utf8 {
-        build_1_pcre2_lib("8");
-    }
-    if do_utf32 {
-        build_1_pcre2_lib("32");
-    }
-}
-
-fn has_git() -> bool {
-    Command::new("git")
-        .arg("--help")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 // On `aarch64-apple-ios` clang fails with the following error.
 //
-//     Undefined symbols for architecture arm64:
-//       "___clear_cache", referenced from:
-//           _sljit_generate_code in libforeign.a(pcre2_jit_compile.o)
-//     ld: symbol(s) not found for architecture arm64
+//   Undefined symbols for architecture arm64:
+//     "___clear_cache", referenced from:
+//         _sljit_generate_code in libforeign.a(pcre2_jit_compile.o)
+//   ld: symbol(s) not found for architecture arm64
 //
 // aarch64-apple-tvos         https://bugreports.qt.io/browse/QTBUG-62993?gerritReviewStatus=All
 // aarch64-apple-darwin       https://github.com/Homebrew/homebrew-core/pull/57419
@@ -187,15 +132,32 @@ fn has_git() -> bool {
 // armv7s-apple-ios           assumed equivalent to aarch64-apple-ios (not tested)
 // i386-apple-ios             assumed equivalent to aarch64-apple-ios (not tested)
 // x86_64-apple-ios-macabi    disabled out of caution (not tested) (needs attention)
+// aarch64-linux-android      does not build
+// armv7-linux-androideabi    does not build
+// aarch64-unknown-linux-musl does not build
+// *-*-*-musleabi*            does not build
 //
-// We may want to monitor developments on the `aarch64-apple-darwin` front as they may end up
-// propagating to all `aarch64`-based targets and the `x86_64` equivalents.
-#[allow(dead_code)]
+// We may want to monitor developments on the `aarch64-apple-darwin` front as
+// they may end up propagating to all `aarch64`-based targets and the `x86_64`
+// equivalents.
 fn enable_jit(target: &str, builder: &mut cc::Build) {
-    if !target.starts_with("aarch64-apple")
-        && !target.contains("apple-ios")
-        && !target.contains("apple-tvos")
-    {
-        builder.define("SUPPORT_JIT", "1");
+    if target.starts_with("aarch64-apple") {
+        return;
     }
+    if target == "aarch64-linux-android" {
+        return;
+    }
+    if target == "armv7-linux-androideabi" {
+        return;
+    }
+    if target == "aarch64-unknown-linux-musl" {
+        return;
+    }
+    if target.contains("musleabi") {
+        return;
+    }
+    if target.contains("apple-ios") || target.contains("apple-tvos") {
+        return;
+    }
+    builder.define("SUPPORT_JIT", "1");
 }

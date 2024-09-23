@@ -1,7 +1,11 @@
 use crate::ffi::CodeUnitWidth32;
 pub use crate::regex_impl::Captures as CapturesImpl;
 pub use crate::regex_impl::Match as MatchImpl;
-use crate::regex_impl::{Regex as RegexImpl, RegexBuilder as RegexBuilderImpl};
+
+#[doc(inline)]
+pub use crate::regex_impl::{
+    Regex as RegexImpl, RegexBuilder as RegexBuilderImpl,
+};
 
 /// A compiled PCRE2 regular expression for matching sequences of Rust chars.
 ///
@@ -18,15 +22,15 @@ pub type RegexBuilder = RegexBuilderImpl<CodeUnitWidth32>;
 /// of the subject string.
 pub type Match<'s> = MatchImpl<'s, CodeUnitWidth32>;
 
-/// Captures represents a group of captured byte strings for a single match.
+/// `Captures` represents a group of captured character strings for a single match.
 ///
 /// The 0th capture always corresponds to the entire match. Each subsequent
 /// index corresponds to the next capture group in the regex. If a capture
-/// group is named, then the matched byte string is *also* available via the
+/// group is named, then the matched string is *also* available via the
 /// `name` method. (Note that the 0th capture is always unnamed and so must be
 /// accessed with the `get` method.)
 ///
-/// Positions returned from a capture group are always byte indices.
+/// Positions returned from a capture group are always character indices.
 ///
 /// `'s` is the lifetime of the matched subject string.
 pub type Captures<'s> = CapturesImpl<'s, CodeUnitWidth32>;
@@ -94,25 +98,18 @@ mod tests {
 
     #[test]
     fn extended() {
-        let re = RegexBuilder::new()
-            .extended(true)
-            .build(b("a b c"))
-            .unwrap();
+        let re = RegexBuilder::new().extended(true).build(b("a b c")).unwrap();
         assert!(re.is_match(&b("abc")).unwrap());
     }
 
     #[test]
     fn multi_line() {
-        let re = RegexBuilder::new()
-            .multi_line(false)
-            .build(b("^abc$"))
-            .unwrap();
+        let re =
+            RegexBuilder::new().multi_line(false).build(b("^abc$")).unwrap();
         assert!(!re.is_match(&b("foo\nabc\nbar")).unwrap());
 
-        let re = RegexBuilder::new()
-            .multi_line(true)
-            .build(b("^abc$"))
-            .unwrap();
+        let re =
+            RegexBuilder::new().multi_line(true).build(b("^abc$")).unwrap();
         assert!(re.is_match(&b("foo\nabc\nbar")).unwrap());
     }
 
@@ -397,7 +394,10 @@ mod tests {
         assert_eq!(cap_iter_tuples(&re, "\n"), &[(0, 0)]);
         assert_eq!(cap_iter_tuples(&re, "\n\n"), &[(0, 0), (1, 1)]);
         assert_eq!(cap_iter_tuples(&re, "\na\n"), &[(0, 0), (1, 1)]);
-        assert_eq!(cap_iter_tuples(&re, "\na\n\n"), &[(0, 0), (1, 1), (3, 3),]);
+        assert_eq!(
+            cap_iter_tuples(&re, "\na\n\n"),
+            &[(0, 0), (1, 1), (3, 3),]
+        );
     }
 
     #[test]
@@ -433,10 +433,31 @@ mod tests {
         // Now bump up the JIT stack limit and check that it succeeds.
         let re = RegexBuilder::new()
             .ucp(true)
-            .jit(true)
+            .jit_if_available(true)
             .max_jit_stack_size(Some(1 << 20))
             .build(b(r"((((\w{10})){100}))+"))
             .unwrap();
         assert!(re.is_match(&b(&hay)).unwrap());
+    }
+
+    #[test]
+    fn find_utf_emoji_as_chars() {
+        let hay : Vec<char> = "0123456789😀👍🏼🎉abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
+        let pattern: Vec<char> = r"(*UTF)
+            (?x)    (?#: Allow comments and whitespace.)
+
+            [^\N{U+0000}-\N{U+007F}]    (?#: Non-ascii code points.)
+            +                           (?#: One or more times.)
+            "
+        .chars()
+        .collect();
+        let re = RegexBuilder::new()
+            .extended(true)
+            .utf(true)
+            .jit_if_available(true)
+            .build(pattern)
+            .unwrap();
+        let matched = re.find(&hay).unwrap().unwrap();
+        assert!(matched.as_bytes().iter().copied().eq("😀👍🏼🎉".chars()));
     }
 }
