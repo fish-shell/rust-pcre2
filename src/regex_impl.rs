@@ -304,6 +304,15 @@ impl<W: CodeUnitWidth> RegexBuilder<W> {
         self
     }
 
+    /// Alternate name for block_utf_pattern_directive.
+    /// This exists because fish-shell unwisely referenced its rust-pcre2 "master"
+    /// branch in Cargo.toml for a period of time, using the function name "never_utf".
+    /// We retain this function name for compatibility with these old fish-shell commits,
+    /// allowing bisecting and similar.
+    pub fn never_utf(&mut self, yes: bool) -> &mut Self {
+        self.block_utf_pattern_directive(yes)
+    }
+
     /// This is now deprecated and is a no-op.
     ///
     /// Previously, this option permitted disabling PCRE2's UTF-8 validity
