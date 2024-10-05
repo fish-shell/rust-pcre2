@@ -57,7 +57,7 @@ jobs:
       run: cargo test --verbose --all --features utf32
     - name: Run tests with static build
       shell: bash
-      run: PCRE2_SYS_STATIC=1 cargo test --verbose --all  --features utf32
+      run: PCRE2_SYS_STATIC=1 cargo test --verbose --all
 
   rustfmt:
     name: rustfmt
