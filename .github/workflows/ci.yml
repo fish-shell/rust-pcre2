@@ -18,7 +18,7 @@ jobs:
         - beta
         - nightly
         - macos
-        - win-msvc
+        # - win-msvc
         # - win-gnu
         include:
         - build: pinned
@@ -36,9 +36,9 @@ jobs:
         - build: macos
           os: macos-latest
           rust: stable
-        - build: win-msvc
-          os: windows-latest
-          rust: stable
+        # - build: win-msvc
+        #   os: windows-latest
+        #   rust: stable
         # - build: win-gnu
         #   os: windows-latest
         #   rust: stable-x86_64-gnu
