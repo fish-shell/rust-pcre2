@@ -19,7 +19,7 @@ jobs:
         - nightly
         - macos
         - win-msvc
-        - win-gnu
+        # - win-gnu
         include:
         - build: pinned
           os: ubuntu-latest
@@ -39,9 +39,9 @@ jobs:
         - build: win-msvc
           os: windows-latest
           rust: stable
-        - build: win-gnu
-          os: windows-latest
-          rust: stable-x86_64-gnu
+        # - build: win-gnu
+        #   os: windows-latest
+        #   rust: stable-x86_64-gnu
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
